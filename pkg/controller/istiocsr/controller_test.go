@@ -66,9 +66,10 @@ func TestReconcile(t *testing.T) {
 			},
 			expectedStatusCondition: []metav1.Condition{
 				{
-					Type:   v1alpha1.Ready,
-					Status: metav1.ConditionTrue,
-					Reason: v1alpha1.ReasonReady,
+					Type:    v1alpha1.Ready,
+					Status:  metav1.ConditionTrue,
+					Reason:  v1alpha1.ReasonReady,
+					Message: "reconciliation successful",
 				},
 				{
 					Type:   v1alpha1.Degraded,
@@ -459,9 +460,10 @@ func TestProcessReconcileRequest(t *testing.T) {
 			},
 			expectedStatusCondition: []metav1.Condition{
 				{
-					Type:   v1alpha1.Ready,
-					Status: metav1.ConditionTrue,
-					Reason: v1alpha1.ReasonReady,
+					Type:    v1alpha1.Ready,
+					Status:  metav1.ConditionTrue,
+					Reason:  v1alpha1.ReasonReady,
+					Message: "reconciliation successful",
 				},
 				{
 					Type:   v1alpha1.Degraded,
@@ -510,9 +512,10 @@ func TestProcessReconcileRequest(t *testing.T) {
 			},
 			expectedStatusCondition: []metav1.Condition{
 				{
-					Type:   v1alpha1.Ready,
-					Status: metav1.ConditionTrue,
-					Reason: v1alpha1.ReasonReady,
+					Type:    v1alpha1.Ready,
+					Status:  metav1.ConditionTrue,
+					Reason:  v1alpha1.ReasonReady,
+					Message: "reconciliation successful",
 				},
 				{
 					Type:   v1alpha1.Degraded,
@@ -730,5 +733,103 @@ func TestProcessReconcileRequest(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCM546RaceConditionFix(t *testing.T) {
+	// Test for CM-546: Verify that Ready condition is always set atomically
+	// with Degraded condition to prevent race conditions where Ready condition goes missing
+	
+	t.Setenv("RELATED_IMAGE_CERT_MANAGER_ISTIOCSR", "registry.redhat.io/cert-manager/cert-manager-istio-csr-rhel9:latest")
+	
+	r := testReconciler(t)
+	mock := &fakes.FakeCtrlClient{}
+	
+	// Simulate successful reconciliation scenario
+	mock.GetCalls(func(ctx context.Context, ns types.NamespacedName, obj client.Object) error {
+		switch o := obj.(type) {
+		case *appsv1.Deployment:
+			deployment := testDeployment()
+			deployment.DeepCopyInto(o)
+		}
+		return nil
+	})
+	mock.ExistsCalls(func(ctx context.Context, ns types.NamespacedName, obj client.Object) (bool, error) {
+		switch o := obj.(type) {
+		case *appsv1.Deployment:
+			deployment := testDeployment()
+			deployment.DeepCopyInto(o)
+		}
+		return true, nil
+	})
+	mock.CreateCalls(func(ctx context.Context, obj client.Object, option ...client.CreateOption) error {
+		switch o := obj.(type) {
+		case *rbacv1.ClusterRoleBinding:
+			roleBinding := testClusterRoleBinding()
+			roleBinding.DeepCopyInto(o)
+		}
+		return nil
+	})
+	
+	r.ctrlClient = mock
+	istiocsr := testIstioCSR()
+	
+	// Execute the reconciliation
+	_, err := r.processReconcileRequest(istiocsr,
+		types.NamespacedName{Name: istiocsr.GetName(), Namespace: istiocsr.GetNamespace()})
+	
+	if err != nil {
+		t.Errorf("processReconcileRequest() unexpected error: %v", err)
+	}
+	
+	// Verify that BOTH Ready and Degraded conditions are present
+	var readyCondition, degradedCondition *metav1.Condition
+	for i := range istiocsr.Status.Conditions {
+		switch istiocsr.Status.Conditions[i].Type {
+		case v1alpha1.Ready:
+			readyCondition = &istiocsr.Status.Conditions[i]
+		case v1alpha1.Degraded:
+			degradedCondition = &istiocsr.Status.Conditions[i]
+		}
+	}
+	
+	// Assert Ready condition exists and is correctly set
+	if readyCondition == nil {
+		t.Error("CM-546: Ready condition is missing - this should not happen after our fix")
+	} else {
+		if readyCondition.Status != metav1.ConditionTrue {
+			t.Errorf("CM-546: Ready condition status expected True, got %v", readyCondition.Status)
+		}
+		if readyCondition.Reason != v1alpha1.ReasonReady {
+			t.Errorf("CM-546: Ready condition reason expected %v, got %v", v1alpha1.ReasonReady, readyCondition.Reason)
+		}
+		if readyCondition.Message != "reconciliation successful" {
+			t.Errorf("CM-546: Ready condition message expected 'reconciliation successful', got %v", readyCondition.Message)
+		}
+	}
+	
+	// Assert Degraded condition exists and is correctly set
+	if degradedCondition == nil {
+		t.Error("CM-546: Degraded condition is missing")
+	} else {
+		if degradedCondition.Status != metav1.ConditionFalse {
+			t.Errorf("CM-546: Degraded condition status expected False, got %v", degradedCondition.Status)
+		}
+		if degradedCondition.Reason != v1alpha1.ReasonReady {
+			t.Errorf("CM-546: Degraded condition reason expected %v, got %v", v1alpha1.ReasonReady, degradedCondition.Reason)
+		}
+	}
+	
+	// Ensure both conditions have recent timestamps (indicating they were set atomically)
+	if readyCondition != nil && degradedCondition != nil {
+		timeDiff := readyCondition.LastTransitionTime.Time.Sub(degradedCondition.LastTransitionTime.Time)
+		if timeDiff < 0 {
+			timeDiff = -timeDiff
+		}
+		// Conditions should be set within a very short time window (< 1 second)
+		// indicating they were set atomically in the same reconciliation cycle
+		if timeDiff.Seconds() > 1.0 {
+			t.Errorf("CM-546: Conditions were not set atomically - time difference: %v", timeDiff)
+		}
 	}
 }

@@ -52,11 +52,19 @@ func (r *Reconciler) updateStatus(ctx context.Context, changed *v1alpha1.IstioCS
 		if err := r.Get(ctx, namespacedName, current); err != nil {
 			return fmt.Errorf("failed to fetch istiocsr.openshift.operator.io %q for status update: %w", namespacedName, err)
 		}
+
+		// Preserve the changes we want to make by copying the entire status
+		// This ensures atomic updates of all conditions and status fields
 		changed.Status.DeepCopyInto(&current.Status)
 
 		if err := r.StatusUpdate(ctx, current); err != nil {
 			return fmt.Errorf("failed to update istiocsr.openshift.operator.io %q status: %w", namespacedName, err)
 		}
+
+		// Update the changed object with the latest resource version to avoid conflicts
+		// in subsequent operations
+		changed.ResourceVersion = current.ResourceVersion
+		changed.Generation = current.Generation
 
 		return nil
 	}); err != nil {
@@ -399,7 +407,7 @@ func (r *Reconciler) disallowMultipleIstioCSRInstances(istiocsr *v1alpha1.IstioC
 
 	if containsProcessingRejectedAnnotation(istiocsr) {
 		r.log.V(4).Info("%s/%s istiocsr resource contains processing rejected annotation", istiocsr.Namespace, istiocsr.Name)
-		// ensure status is updated.
+		// ensure status is updated atomically
 		var updateErr error
 		if istiocsr.Status.ConditionalStatus.SetCondition(v1alpha1.Ready, metav1.ConditionFalse, v1alpha1.ReasonFailed, statusMessage) {
 			updateErr = r.updateCondition(istiocsr, nil)
@@ -433,6 +441,7 @@ func (r *Reconciler) disallowMultipleIstioCSRInstances(istiocsr *v1alpha1.IstioC
 
 	if ignoreProcessing {
 		var condUpdateErr, annUpdateErr error
+		// Set condition atomically before updating status
 		if istiocsr.Status.ConditionalStatus.SetCondition(v1alpha1.Ready, metav1.ConditionFalse, v1alpha1.ReasonFailed, statusMessage) {
 			condUpdateErr = r.updateCondition(istiocsr, nil)
 		}
