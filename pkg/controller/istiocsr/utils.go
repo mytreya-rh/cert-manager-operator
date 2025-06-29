@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -46,24 +48,102 @@ func init() {
 // updateStatus is for updating the status subresource of istiocsr.openshift.operator.io.
 func (r *Reconciler) updateStatus(ctx context.Context, changed *v1alpha1.IstioCSR) error {
 	namespacedName := types.NamespacedName{Name: changed.Name, Namespace: changed.Namespace}
-	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		r.log.V(4).Info("updating istiocsr.openshift.operator.io status", "request", namespacedName)
-		current := &v1alpha1.IstioCSR{}
-		if err := r.Get(ctx, namespacedName, current); err != nil {
-			return fmt.Errorf("failed to fetch istiocsr.openshift.operator.io %q for status update: %w", namespacedName, err)
-		}
-		changed.Status.DeepCopyInto(&current.Status)
 
-		if err := r.StatusUpdate(ctx, current); err != nil {
-			return fmt.Errorf("failed to update istiocsr.openshift.operator.io %q status: %w", namespacedName, err)
+	// Fetch the current state from API to get the latest resourceVersion
+	current := &v1alpha1.IstioCSR{}
+	if err := r.Get(ctx, namespacedName, current); err != nil {
+		return fmt.Errorf("failed to fetch current istiocsr.openshift.operator.io %q for status update: %w", namespacedName, err)
+	}
+
+	// Check if status is already up-to-date to avoid unnecessary updates
+	if r.isStatusAlreadyUpToDate(current, changed) {
+		r.log.V(4).Info("status already up-to-date, skipping update",
+			"request", namespacedName,
+			"resourceVersion", current.ResourceVersion)
+		return nil
+	}
+
+	// Sync the cached object with the current resourceVersion since we're the primary controller
+	// This avoids false conflicts when the controller is the main one updating the resource
+	changed.ResourceVersion = current.ResourceVersion
+
+	r.log.V(4).Info("updating cached object with current resourceVersion",
+		"request", namespacedName,
+		"resourceVersion", current.ResourceVersion)
+
+	// Use a simple retry with fewer attempts since we're avoiding most conflicts
+	customRetry := retry.DefaultBackoff
+	customRetry.Steps = 2                         // Minimal retries since we sync resourceVersion
+	customRetry.Duration = 100 * time.Millisecond // Short delay
+
+	if err := retry.RetryOnConflict(customRetry, func() error {
+		r.log.V(4).Info("attempting status update", "resourceVersion", changed.ResourceVersion)
+
+		// Use the synced object directly for the status update
+		if err := r.StatusUpdate(ctx, changed); err != nil {
+			if apierrors.IsConflict(err) {
+				r.log.V(4).Info("status update conflict, will retry", "resourceVersion", changed.ResourceVersion)
+
+				// On conflict, refresh the resourceVersion and try again
+				fresh := &v1alpha1.IstioCSR{}
+				if fetchErr := r.Get(ctx, namespacedName, fresh); fetchErr != nil {
+					return fmt.Errorf("failed to fetch fresh resourceVersion after conflict: %w", fetchErr)
+				}
+
+				// Double-check if we still need to update
+				if r.isStatusAlreadyUpToDate(fresh, changed) {
+					r.log.V(4).Info("status became up-to-date during conflict resolution")
+					return nil // Success - no update needed
+				}
+
+				// Update resourceVersion and retry
+				changed.ResourceVersion = fresh.ResourceVersion
+				r.log.V(4).Info("refreshed resourceVersion after conflict", "newResourceVersion", fresh.ResourceVersion)
+			}
+			return err
 		}
 
+		r.log.V(4).Info("status update successful", "resourceVersion", changed.ResourceVersion)
 		return nil
 	}); err != nil {
+		r.log.Error(err, "status update failed after retries",
+			"request", namespacedName,
+			"maxAttempts", customRetry.Steps)
 		return err
 	}
 
 	return nil
+}
+
+// isStatusAlreadyUpToDate checks if the current status matches the desired status
+func (r *Reconciler) isStatusAlreadyUpToDate(current, desired *v1alpha1.IstioCSR) bool {
+	// Compare conditions - the main thing we update in status
+	if len(current.Status.Conditions) != len(desired.Status.Conditions) {
+		return false
+	}
+
+	// Create maps for easy comparison
+	currentConditions := make(map[string]metav1.Condition)
+	for _, cond := range current.Status.Conditions {
+		currentConditions[cond.Type] = cond
+	}
+
+	for _, desiredCond := range desired.Status.Conditions {
+		currentCond, exists := currentConditions[desiredCond.Type]
+		if !exists {
+			return false
+		}
+
+		// Compare the important fields (ignore LastTransitionTime as it can vary)
+		if currentCond.Status != desiredCond.Status ||
+			currentCond.Reason != desiredCond.Reason ||
+			currentCond.Message != desiredCond.Message {
+			return false
+		}
+	}
+
+	// Could add other status field comparisons here if needed
+	return true
 }
 
 // addFinalizer adds finalizer to istiocsr.openshift.operator.io resource.

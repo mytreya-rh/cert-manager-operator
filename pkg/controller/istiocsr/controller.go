@@ -325,8 +325,13 @@ func (r *Reconciler) processReconcileRequest(istiocsr *v1alpha1.IstioCSR, req ty
 		}
 	}
 
-	if istiocsr.Status.SetCondition(v1alpha1.Degraded, metav1.ConditionFalse, v1alpha1.ReasonReady, "") ||
-		istiocsr.Status.SetCondition(v1alpha1.Ready, metav1.ConditionTrue, v1alpha1.ReasonReady, "reconciliation successful") {
+	// Note: All resource synchronization is handled in reconcileIstioCSRDeployment above
+
+	// Fix short-circuiting bug - evaluate both conditions separately
+	degradedChanged := istiocsr.Status.SetCondition(v1alpha1.Degraded, metav1.ConditionFalse, v1alpha1.ReasonReady, "")
+	readyChanged := istiocsr.Status.SetCondition(v1alpha1.Ready, metav1.ConditionTrue, v1alpha1.ReasonReady, "reconciliation successful")
+
+	if degradedChanged || readyChanged {
 		errUpdate = r.updateCondition(istiocsr, nil)
 	}
 	return ctrl.Result{}, errUpdate
