@@ -21,6 +21,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -234,8 +236,49 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	controllerWatchResourcePredicates := builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}, controllerWatchResources)
 	controllerManagedResourcePredicates := builder.WithPredicates(controllerManagedResources)
 
+	// Custom predicate to log IstioCSR events for debugging
+	loggingPredicate := predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool {
+			r.log.V(1).Info("PRIMARY WATCH: IstioCSR Create event",
+				"name", e.Object.GetName(),
+				"namespace", e.Object.GetNamespace(),
+				"resourceVersion", e.Object.GetResourceVersion(),
+				"generation", e.Object.GetGeneration(),
+				"finalizers", e.Object.GetFinalizers())
+			return predicate.GenerationChangedPredicate{}.Create(e)
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			r.log.V(1).Info("PRIMARY WATCH: IstioCSR Update event",
+				"name", e.ObjectNew.GetName(),
+				"namespace", e.ObjectNew.GetNamespace(),
+				"oldResourceVersion", e.ObjectOld.GetResourceVersion(),
+				"newResourceVersion", e.ObjectNew.GetResourceVersion(),
+				"oldGeneration", e.ObjectOld.GetGeneration(),
+				"newGeneration", e.ObjectNew.GetGeneration(),
+				"oldFinalizers", e.ObjectOld.GetFinalizers(),
+				"newFinalizers", e.ObjectNew.GetFinalizers())
+			return predicate.GenerationChangedPredicate{}.Update(e)
+		},
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			r.log.V(1).Info("PRIMARY WATCH: IstioCSR Delete event",
+				"name", e.Object.GetName(),
+				"namespace", e.Object.GetNamespace(),
+				"resourceVersion", e.Object.GetResourceVersion(),
+				"generation", e.Object.GetGeneration())
+			return predicate.GenerationChangedPredicate{}.Delete(e)
+		},
+		GenericFunc: func(e event.GenericEvent) bool {
+			r.log.V(1).Info("PRIMARY WATCH: IstioCSR Generic event",
+				"name", e.Object.GetName(),
+				"namespace", e.Object.GetNamespace(),
+				"resourceVersion", e.Object.GetResourceVersion(),
+				"generation", e.Object.GetGeneration())
+			return predicate.GenerationChangedPredicate{}.Generic(e)
+		},
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.IstioCSR{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		For(&v1alpha1.IstioCSR{}, builder.WithPredicates(loggingPredicate)).
 		Named(ControllerName).
 		Watches(&certmanagerv1.Certificate{}, handler.EnqueueRequestsFromMapFunc(mapFunc), withIgnoreStatusUpdatePredicates).
 		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(mapFunc), withIgnoreStatusUpdatePredicates).
@@ -266,6 +309,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 		return ctrl.Result{}, fmt.Errorf("failed to fetch istiocsr.openshift.operator.io %q during reconciliation: %w", req.NamespacedName, err)
 	}
+
+	// LOG: Track what might have triggered this reconciliation
+	hasFinalizer := controllerutil.ContainsFinalizer(istiocsr, finalizer)
+	hasProcessedAnnotation := containsProcessedAnnotation(istiocsr)
+	isEmptyStatus := reflect.DeepEqual(istiocsr.Status, v1alpha1.IstioCSRStatus{})
+
+	r.log.V(1).Info("reconciliation trigger analysis",
+		"hasFinalizer", hasFinalizer,
+		"hasProcessedAnnotation", hasProcessedAnnotation,
+		"isEmptyStatus", isEmptyStatus,
+		"resourceVersion", istiocsr.GetResourceVersion(),
+		"generation", istiocsr.GetGeneration(),
+		"finalizers", istiocsr.GetFinalizers())
 
 	if !istiocsr.DeletionTimestamp.IsZero() {
 		r.log.V(1).Info("istiocsr.openshift.operator.io is marked for deletion", "namespace", req.NamespacedName)
@@ -298,6 +354,13 @@ func (r *Reconciler) processReconcileRequest(istiocsr *v1alpha1.IstioCSR, req ty
 		r.log.V(1).Info("starting reconciliation of newly created istiocsr", "namespace", istiocsr.GetNamespace(), "name", istiocsr.GetName())
 		istioCSRCreateRecon = true
 	}
+
+	// LOG: Check current status conditions to detect race conditions
+	r.log.V(1).Info("processReconcileRequest status check",
+		"hasReadyCondition", len(istiocsr.Status.Conditions) > 0,
+		"conditionCount", len(istiocsr.Status.Conditions),
+		"conditions", istiocsr.Status.Conditions,
+		"resourceVersion", istiocsr.GetResourceVersion())
 
 	if err := r.disallowMultipleIstioCSRInstances(istiocsr); err != nil {
 		if IsMultipleInstanceError(err) {
