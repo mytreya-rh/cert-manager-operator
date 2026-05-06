@@ -154,7 +154,7 @@ func TestReconcile(t *testing.T) {
 				{
 					Type:   v1alpha1.Ready,
 					Status: metav1.ConditionFalse,
-					Reason: v1alpha1.ReasonFailed,
+					Reason: v1alpha1.ReasonInProgress,
 				},
 				{
 					Type:   v1alpha1.Degraded,
@@ -233,7 +233,7 @@ func TestReconcile(t *testing.T) {
 				{
 					Type:   v1alpha1.Ready,
 					Status: metav1.ConditionFalse,
-					Reason: v1alpha1.ReasonFailed,
+					Reason: v1alpha1.ReasonReady,
 				},
 				{
 					Type:   v1alpha1.Degraded,
@@ -318,16 +318,19 @@ func TestReconcile(t *testing.T) {
 					return nil
 				})
 			},
+			// StatusUpdate fails for ALL IstioCSR calls (including RBAC status
+			// updates), so RBAC reconciliation fails with an irrecoverable error
+			// before reaching the success conditions path.
 			expectedStatusCondition: []metav1.Condition{
 				{
 					Type:   v1alpha1.Ready,
-					Status: metav1.ConditionTrue,
+					Status: metav1.ConditionFalse,
 					Reason: v1alpha1.ReasonReady,
 				},
 				{
 					Type:   v1alpha1.Degraded,
-					Status: metav1.ConditionFalse,
-					Reason: v1alpha1.ReasonReady,
+					Status: metav1.ConditionTrue,
+					Reason: v1alpha1.ReasonFailed,
 				},
 			},
 			requeue: false,
@@ -401,11 +404,30 @@ func TestReconcile(t *testing.T) {
 			if tt.requeue && result.IsZero() {
 				t.Errorf("Reconcile() expected requeue to be set")
 			}
-			for _, c1 := range istiocsr.Status.Conditions {
-				for _, c2 := range tt.expectedStatusCondition {
-					if c1.Type == c2.Type {
-						if c1.Status != c2.Status || c1.Reason != c2.Reason {
-							t.Errorf("Reconcile() condition: %+v, expectedStatusCondition: %+v", c1, c2)
+			// Reconcile operates on an internally-fetched IstioCSR, not the local
+			// variable. RBAC reconciliation also calls StatusUpdate to persist
+			// clusterrole/rolebinding names, so the condition update is always the
+			// last StatusUpdate call.
+			if len(tt.expectedStatusCondition) > 0 {
+				n := mock.StatusUpdateCallCount()
+				if n == 0 {
+					t.Errorf("Reconcile() expected StatusUpdate to be called for condition checking")
+				} else {
+					_, updatedObj, _ := mock.StatusUpdateArgsForCall(n - 1)
+					updatedIstiocsr, ok := updatedObj.(*v1alpha1.IstioCSR)
+					if !ok {
+						t.Errorf("Reconcile() StatusUpdate called with non-IstioCSR: %T", updatedObj)
+					} else {
+						for _, want := range tt.expectedStatusCondition {
+							got := updatedIstiocsr.Status.GetCondition(want.Type)
+							if got == nil {
+								t.Errorf("Reconcile() condition %q missing from status", want.Type)
+								continue
+							}
+							if got.Status != want.Status || got.Reason != want.Reason {
+								t.Errorf("Reconcile() condition %q: got {Status:%s Reason:%s}, want {Status:%s Reason:%s}",
+									want.Type, got.Status, got.Reason, want.Status, want.Reason)
+							}
 						}
 					}
 				}
@@ -459,9 +481,10 @@ func TestProcessReconcileRequest(t *testing.T) {
 			},
 			expectedStatusCondition: []metav1.Condition{
 				{
-					Type:   v1alpha1.Ready,
-					Status: metav1.ConditionTrue,
-					Reason: v1alpha1.ReasonReady,
+					Type:    v1alpha1.Ready,
+					Status:  metav1.ConditionTrue,
+					Reason:  v1alpha1.ReasonReady,
+					Message: "reconciliation successful",
 				},
 				{
 					Type:   v1alpha1.Degraded,
@@ -510,9 +533,10 @@ func TestProcessReconcileRequest(t *testing.T) {
 			},
 			expectedStatusCondition: []metav1.Condition{
 				{
-					Type:   v1alpha1.Ready,
-					Status: metav1.ConditionTrue,
-					Reason: v1alpha1.ReasonReady,
+					Type:    v1alpha1.Ready,
+					Status:  metav1.ConditionTrue,
+					Reason:  v1alpha1.ReasonReady,
+					Message: "reconciliation successful",
 				},
 				{
 					Type:   v1alpha1.Degraded,
@@ -720,13 +744,15 @@ func TestProcessReconcileRequest(t *testing.T) {
 			if !reflect.DeepEqual(istiocsr.Annotations, tt.expectedAnnotations) {
 				t.Errorf("processReconcileRequest() annotations: %v, expectedAnnotations: %v", istiocsr.Annotations, tt.expectedAnnotations)
 			}
-			for _, c1 := range istiocsr.Status.Conditions {
-				for _, c2 := range tt.expectedStatusCondition {
-					if c1.Type == c2.Type {
-						if c1.Status != c2.Status || c1.Reason != c2.Reason || c1.Message != c2.Message {
-							t.Errorf("processReconcileRequest() condition: %+v, expectedStatusCondition: %+v", c1, c2)
-						}
-					}
+			for _, want := range tt.expectedStatusCondition {
+				got := istiocsr.Status.GetCondition(want.Type)
+				if got == nil {
+					t.Errorf("processReconcileRequest() condition %q missing from status", want.Type)
+					continue
+				}
+				if got.Status != want.Status || got.Reason != want.Reason || got.Message != want.Message {
+					t.Errorf("processReconcileRequest() condition %q: got {Status:%s Reason:%s Message:%s}, want {Status:%s Reason:%s Message:%s}",
+						want.Type, got.Status, got.Reason, got.Message, want.Status, want.Reason, want.Message)
 				}
 			}
 		})
