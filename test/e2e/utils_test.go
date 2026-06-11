@@ -1842,6 +1842,7 @@ func setupVaultServer(ctx context.Context, cfg *rest.Config, loader library.Dyna
 
 	allowPrivilegeEscalation := false
 	runAsNonRoot := true
+	runAsUser := int64(1001)
 	privileged := false
 	installerPodName := "vault-installer"
 	helmPod := &corev1.Pod{
@@ -1867,6 +1868,7 @@ func setupVaultServer(ctx context.Context, cfg *rest.Config, loader library.Dyna
 					SecurityContext: &corev1.SecurityContext{
 						AllowPrivilegeEscalation: &allowPrivilegeEscalation,
 						RunAsNonRoot:             &runAsNonRoot,
+						RunAsUser:                &runAsUser,
 						Privileged:               &privileged,
 						Capabilities: &corev1.Capabilities{
 							Drop: []corev1.Capability{"ALL"},
