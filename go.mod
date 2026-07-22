@@ -138,4 +138,4 @@ require (
 	sigs.k8s.io/randfill v1.0.0 // indirect
 )
 
-replace github.com/cert-manager/cert-manager => github.com/openshift/jetstack-cert-manager v1.19.5-0.20260610160211-8f1ff9a3f6e7
+replace github.com/cert-manager/cert-manager => github.com/openshift/jetstack-cert-manager v1.19.7-0.20260722075217-d2224398552d
