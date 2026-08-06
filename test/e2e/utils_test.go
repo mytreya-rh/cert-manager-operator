@@ -1840,7 +1840,10 @@ func setupVaultServer(ctx context.Context, cfg *rest.Config, loader library.Dyna
 	// Create Helm installer pod
 	helmCmd := fmt.Sprintf("helm install %s ./vault -n %s --values /helm/custom-values.yaml", releaseName, namespace)
 
-	privileged := true
+	allowPrivilegeEscalation := false
+	runAsNonRoot := true
+	runAsUser := int64(1001)
+	privileged := false
 	installerPodName := "vault-installer"
 	helmPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1850,6 +1853,11 @@ func setupVaultServer(ctx context.Context, cfg *rest.Config, loader library.Dyna
 		Spec: corev1.PodSpec{
 			ServiceAccountName: serviceAccountName,
 			RestartPolicy:      corev1.RestartPolicyNever,
+			SecurityContext: &corev1.PodSecurityContext{
+				SeccompProfile: &corev1.SeccompProfile{
+					Type: corev1.SeccompProfileTypeRuntimeDefault,
+				},
+			},
 			Containers: []corev1.Container{
 				{
 					Name:            "helm",
@@ -1863,7 +1871,16 @@ func setupVaultServer(ctx context.Context, cfg *rest.Config, loader library.Dyna
 						},
 					},
 					SecurityContext: &corev1.SecurityContext{
-						Privileged: &privileged,
+						AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+						RunAsNonRoot:             &runAsNonRoot,
+						RunAsUser:                &runAsUser,
+						Privileged:               &privileged,
+						SeccompProfile: &corev1.SeccompProfile{
+							Type: corev1.SeccompProfileTypeRuntimeDefault,
+						},
+						Capabilities: &corev1.Capabilities{
+							Drop: []corev1.Capability{"ALL"},
+						},
 					},
 				},
 			},
