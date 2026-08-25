@@ -19,7 +19,7 @@ export XDG_CONFIG_HOME ?= $(PROJECT_ROOT)/_output/.config
 # ============================================================================
 
 # DEFAULT_VERSION is the default version to use for image tags when not set.
-DEFAULT_VERSION := 1.19.1
+DEFAULT_VERSION := 1.19.2
 
 # Helper function to validate semver (Major.Minor.Patch format)
 # Returns 'valid' if the version matches semver (X.Y.Z) or 'latest', empty string otherwise
