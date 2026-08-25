@@ -2,5 +2,5 @@
 packageName: cert-manager-operator
 channels:
 - name: stable-v1
-  currentCSV: cert-manager-operator.v1.19.1
+  currentCSV: cert-manager-operator.v1.19.2
 defaultChannel: stable-v1
